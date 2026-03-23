@@ -483,7 +483,7 @@ The SQL for satchel items can be run at any time — use `#reloadstatic` in-game
 - Items with `NoPet=1` flag are skipped during auto-equip
 - Satchels are searched in inventory (slots 23-32) then bank (2000-2023)
 - Charmed pets receive equipment but are classless (uses all three bags if found)
-- **`.petequip` is visual only** — `CalcBonuses()` is not exposed to Lua, so `.petequip` equips items visually but does not recalculate AC, ATK, or other stats. Full stat bonuses are only applied on pet summon (C++ `ApplyPetBagEquipment`) and on zoning (pet restore). To get full stats from new gear, resummon your pet.
+- **`.petequip` applies full stats** — `AddItem()` internally calls `AddLootDrop()` which calls `CalcBonuses()` when an equipment slot is assigned. Both the C++ auto-equip on summon and the Lua `.petequip` command apply complete stat bonuses (AC, ATK, HP, etc.). To update gear on a live pet, swap items in the satchel and run `.petequip` — no resummon needed.
 
 ---
 
