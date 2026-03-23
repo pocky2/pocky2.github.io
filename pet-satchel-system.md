@@ -251,43 +251,93 @@ end
 
 ### `.petstats` — View Pet Statistics
 
-Shows comprehensive stats for all active pets including equipment bonuses:
+Shows comprehensive stats for all active pets including equipment bonuses, combat modifiers, and effective AC.
+
+**Base AC vs Effective AC:** The `AC` value shown is the pet's base AC from its NPC template. The `Eff` (effective) value is the actual combat AC used for mitigation, calculated by `ACSum()` which adds: item AC bonuses, defense skill, AGI bonus, owner's pet mitigation AAs, and spell/AA AC. When satchel items are equipped, you'll see the effective AC jump significantly while base AC stays the same.
+
+> **Requires:** `GetMitigationAC()` must be exposed to Lua — see [C++ Lua Binding](#lua-binding-getmitigationac) below.
 
 ```lua
-if msg:lower() == ".petstats" then
-    local entity_list = eq.get_entity_list()
-    local npc_list = entity_list:GetNPCList()
-    local found = false
+if e.message:match("^%.petstats$") then
+    local npc_list = eq.get_entity_list():GetNPCList()
+    local pet_count = 0
+    local my_id = e.self:GetID()
 
     for npc in npc_list.entries do
-        if npc:GetOwnerID() == e.self:GetID() then
-            found = true
-            local name = npc:GetCleanName()
-            e.self:Message(15, "--- " .. name .. " ---")
-            e.self:Message(15, string.format(
-                "Level: %d | HP: %d/%d | Mana: %d/%d",
-                npc:GetLevel(), npc:GetHP(), npc:GetMaxHP(),
-                npc:GetMana(), npc:GetMaxMana()))
-            e.self:Message(15, string.format(
-                "AC: %d | ATK: %d | DMG: %d-%d",
-                npc:GetAC(), npc:GetATK(),
-                npc:GetMinDMG(), npc:GetMaxDMG()))
-            e.self:Message(15, string.format(
-                "STR:%d STA:%d DEX:%d AGI:%d INT:%d WIS:%d CHA:%d",
-                npc:GetSTR(), npc:GetSTA(), npc:GetDEX(), npc:GetAGI(),
-                npc:GetINT(), npc:GetWIS(), npc:GetCHA()))
-            e.self:Message(15, string.format(
-                "MR:%d FR:%d CR:%d DR:%d PR:%d",
-                npc:GetMR(), npc:GetFR(), npc:GetCR(),
-                npc:GetDR(), npc:GetPR()))
-            e.self:Message(15, string.format(
-                "Attack Speed: %.1f | Delay: %d",
-                npc:GetAttackSpeed(), npc:GetAttackDelay()))
+        if npc:GetOwnerID() == my_id then
+            pet_count = pet_count + 1
+            e.self:Message(15, "--- Pet " .. pet_count .. ": " .. npc:GetCleanName()
+                .. " (Lv " .. npc:GetLevel() .. ") ---")
+            e.self:Message(15, "  HP: " .. npc:GetHP() .. " / " .. npc:GetMaxHP())
+            if npc:GetMaxMana() > 0 then
+                e.self:Message(15, "  Mana: " .. npc:GetMana() .. " / " .. npc:GetMaxMana())
+            end
+            e.self:Message(15, "  AC: " .. npc:GetAC() .. " (Eff: " .. npc:GetMitigationAC()
+                .. ")  ATK: " .. npc:GetATK() .. "  MinDmg: " .. npc:GetMinDMG()
+                .. "  MaxDmg: " .. npc:GetMaxDMG())
+            e.self:Message(15, "  STR: " .. npc:GetSTR() .. "  STA: " .. npc:GetSTA()
+                .. "  DEX: " .. npc:GetDEX() .. "  AGI: " .. npc:GetAGI())
+            e.self:Message(15, "  INT: " .. npc:GetINT() .. "  WIS: " .. npc:GetWIS()
+                .. "  CHA: " .. npc:GetCHA())
+            e.self:Message(15, "  MR: " .. npc:GetMR() .. "  FR: " .. npc:GetFR()
+                .. "  CR: " .. npc:GetCR() .. "  DR: " .. npc:GetDR()
+                .. "  PR: " .. npc:GetPR())
+            e.self:Message(15, "  AtkSpd: " .. string.format("%.1f", npc:GetAttackSpeed())
+                .. "  AtkDly: " .. npc:GetAttackDelay()
+                .. "  Acc: " .. npc:GetAccuracyRating()
+                .. "  Avoid: " .. npc:GetAvoidanceRating())
+
+            -- Modifiers section (only show non-zero values)
+            local haste = npc:GetHaste()
+            local item_b = npc:GetItemBonuses()
+            local spell_b = npc:GetSpellBonuses()
+
+            local mods = {}
+            if haste ~= 0 then table.insert(mods, "Haste: " .. haste .. "%") end
+
+            local ds = spell_b:DamageShield()
+            if ds ~= 0 then table.insert(mods, "DmgShield: " .. ds) end
+
+            local dbl = item_b:DoubleAttackChance() + spell_b:DoubleAttackChance()
+            if dbl ~= 0 then table.insert(mods, "DblAtk: " .. dbl .. "%") end
+
+            local tri = item_b:TripleAttackChance() + spell_b:TripleAttackChance()
+            if tri ~= 0 then table.insert(mods, "TriAtk: " .. tri .. "%") end
+
+            local flurry = item_b:FlurryChance() + spell_b:FlurryChance()
+            if flurry ~= 0 then table.insert(mods, "Flurry: " .. flurry .. "%") end
+
+            local crit = item_b:CriticalHitChance(0) + spell_b:CriticalHitChance(0)
+            if crit ~= 0 then table.insert(mods, "Crit: " .. crit .. "%") end
+
+            local parry = item_b:ParryChance() + spell_b:ParryChance()
+            if parry ~= 0 then table.insert(mods, "Parry: " .. parry .. "%") end
+
+            local dodge = item_b:DodgeChance() + spell_b:DodgeChance()
+            if dodge ~= 0 then table.insert(mods, "Dodge: " .. dodge .. "%") end
+
+            local ripo = item_b:RiposteChance() + spell_b:RiposteChance()
+            if ripo ~= 0 then table.insert(mods, "Ripo: " .. ripo .. "%") end
+
+            local hh = item_b:HundredHands() + spell_b:HundredHands()
+            if hh ~= 0 then table.insert(mods, "HndHnds: " .. hh) end
+
+            local proc = item_b:ProcChance() + spell_b:ProcChance()
+            if proc ~= 0 then table.insert(mods, "ProcRate: " .. proc .. "%") end
+
+            local dmgmod = item_b:DamageModifier(0) + spell_b:DamageModifier(0)
+            if dmgmod ~= 0 then table.insert(mods, "DmgMod: " .. dmgmod .. "%") end
+
+            if #mods > 0 then
+                e.self:Message(18, "  Modifiers: " .. table.concat(mods, " | "))
+            end
         end
     end
 
-    if not found then
-        e.self:Message(13, "You have no active pets.")
+    if pet_count == 0 then
+        e.self:Message(13, "You have no pets summoned.")
+    else
+        e.self:Message(18, pet_count .. " pet(s) found.")
     end
 end
 ```
@@ -322,6 +372,37 @@ if ($text =~ /satchel/i) {
 3. **Summon pet** — gear auto-equips instantly on summon
 4. **Change gear** — swap items in the satchel, then use `.petequip` to re-equip live pets
 5. **Check stats** — use `.petstats` to verify equipment bonuses are applied
+
+---
+
+## Lua Binding: GetMitigationAC
+
+The `.petstats` command uses `GetMitigationAC()` to show effective (combat) AC. This method exists in C++ (`Mob::GetMitigationAC()`) but is **not exposed to Lua by default** in EQEmu. You need to add the binding:
+
+**Why this is needed:** EQEmu's `GetAC()` returns the raw base AC value from the NPC template. The actual AC used in combat is `mitigation_ac`, calculated by `ACSum()` — which includes item bonuses, defense skill, AGI, owner's pet mitigation AAs, and spell/AA buffs. Without this binding, Lua scripts can only see base AC, making it impossible to verify that satchel equipment is actually improving pet survivability.
+
+**`zone/lua_mob.h`** — add the declaration near other AC methods:
+
+```cpp
+int GetMitigationAC();
+```
+
+**`zone/lua_mob.cpp`** — add the implementation:
+
+```cpp
+int Lua_Mob::GetMitigationAC() {
+    Lua_Safe_Call_Int();
+    return self->GetMitigationAC();
+}
+```
+
+And register it in the luabind scope (near the existing `GetDisplayAC` binding):
+
+```cpp
+.def("GetMitigationAC", &Lua_Mob::GetMitigationAC)
+```
+
+> **Note:** If you skip this binding, you can replace `npc:GetMitigationAC()` with `npc:GetAC()` in the Lua script — you just won't see the effective AC that includes item bonuses.
 
 ---
 
@@ -380,6 +461,8 @@ The SQL for satchel items can be run at any time — use `#reloadstatic` in-game
 | `zone/pets.cpp` | `ApplyPetBagEquipment()`, `GetPetOriginClass()` |
 | `zone/spell_effects.cpp` | Charm auto-equip call |
 | `zone/client.h` | `ApplyPetBagEquipment()` declaration |
+| `zone/lua_mob.h` | `GetMitigationAC()` declaration |
+| `zone/lua_mob.cpp` | `GetMitigationAC()` implementation + luabind `.def()` |
 | `quests/global/global_player.lua` | `.petequip`, `.petstats` commands |
 
 ## Known Limitations
