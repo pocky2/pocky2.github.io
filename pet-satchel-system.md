@@ -21,6 +21,21 @@ The Pet Satchel System adds three container items (one per pet class) that auto-
 
 ---
 
+## Quick Start — Implementation Order
+
+Follow these steps in order:
+
+1. **[Database Setup](#database-setup)** — Create the 3 satchel container items in SQL
+2. **[C++ Implementation](#c-implementation)** — Add `ApplyPetBagEquipment()`, `GetPetOriginClass()`, call sites, and header declaration
+3. **[Lua Binding (optional)](#lua-binding-getmitigationac)** — Expose `GetMitigationAC()` to Lua for effective AC display in `.petstats`
+4. **[Build & Deploy](#building--deploying)** — Rebuild `zone.exe` and deploy
+5. **[Lua Scripts](#player-commands-lua)** — Add `.petequip` and `.petstats` to `global_player.lua` (no rebuild needed)
+6. **[NPC Distribution (optional)](#npc-distribution-optional)** — Give players a way to obtain satchels
+
+Steps 1 and 5-6 don't require a rebuild. Steps 2-3 require rebuilding `zone.exe`.
+
+---
+
 ## Database Setup
 
 ### Pet Satchel Items
@@ -59,7 +74,7 @@ void Client::ApplyPetBagEquipment(NPC* pet)
     // Determine which class this pet belongs to
     int origin_class = GetPetOriginClass(pet, this);
 
-    // Map class to bag item ID
+    // Map class to bag item ID (adjust IDs to match your items table)
     uint32 bag_id = 0;
     switch (origin_class) {
         case 15: bag_id = 800500; break; // BST
@@ -68,62 +83,54 @@ void Client::ApplyPetBagEquipment(NPC* pet)
         default: return; // Not a pet class
     }
 
-    // Search inventory slots 23-32 (general) and 2000-2023 (bank) for the bag
-    const EQ::ItemInstance* bag = nullptr;
-    int bag_slot = -1;
+    // Search general inventory and bank for the matching satchel
+    struct SlotRange { int16 begin; int16 end; int16 bag_base; };
+    SlotRange ranges[] = {
+        { EQ::invslot::GENERAL_BEGIN, EQ::invslot::GENERAL_END, EQ::invbag::GENERAL_BAGS_BEGIN },
+        { EQ::invslot::BANK_BEGIN,    EQ::invslot::BANK_END,    EQ::invbag::BANK_BAGS_BEGIN },
+    };
 
-    // Check general inventory
-    for (int slot = EQ::invslot::GENERAL_BEGIN; slot <= EQ::invslot::GENERAL_END; slot++) {
-        const EQ::ItemInstance* item = GetInv().GetItem(slot);
-        if (item && item->GetID() == bag_id) {
-            bag = item;
-            bag_slot = slot;
-            break;
-        }
-    }
+    for (auto& range : ranges) {
+        for (int slot = range.begin; slot <= range.end; slot++) {
+            const EQ::ItemInstance* inst = GetInv().GetItem(slot);
+            if (!inst || !inst->GetItem()) continue;
+            if (inst->GetItem()->ID != bag_id) continue;
+            if (!inst->IsClassBag()) continue;
 
-    // Check bank if not found
-    if (!bag) {
-        for (int slot = EQ::invslot::BANK_BEGIN; slot <= EQ::invslot::BANK_END; slot++) {
-            const EQ::ItemInstance* item = GetInv().GetItem(slot);
-            if (item && item->GetID() == bag_id) {
-                bag = item;
-                bag_slot = slot;
-                break;
+            // Found the bag — iterate its contents
+            int equipped = 0;
+            int bag_slots = inst->GetItem()->BagSlots;
+            int16 bag_base = range.bag_base +
+                ((slot - range.begin) * EQ::invbag::SLOT_COUNT);
+
+            for (int sub = 0; sub < bag_slots; sub++) {
+                const EQ::ItemInstance* sub_inst = GetInv().GetItem(bag_base + sub);
+                if (!sub_inst || !sub_inst->GetItem()) continue;
+
+                const EQ::ItemData* item_data = sub_inst->GetItem();
+                if (item_data->NoPet) continue;
+
+                // Create a lootdrop entry with equip_item = 1
+                auto lde = LootdropEntriesRepository::NewNpcEntity();
+                lde.equip_item = 1;
+                lde.item_charges = 1;
+                pet->AddLootDrop(item_data, lde, true);
+                equipped++;
             }
+
+            if (equipped > 0) {
+                pet->UpdateEquipmentLight();
+                pet->CalcBonuses();
+                Message(Chat::Green, "Pet equipped %d item(s) from your %s.",
+                        equipped, inst->GetItem()->Name);
+            }
+            return; // Only process first matching bag found
         }
-    }
-
-    if (!bag) return;
-
-    // Equip each item from the bag onto the pet
-    int equipped = 0;
-    for (int i = 0; i < bag->GetItem()->BagSlots && i < 20; i++) {
-        const EQ::ItemInstance* sub = bag->GetItem(i);
-        if (!sub || !sub->GetItem()) continue;
-
-        // Skip NoPet items
-        if (sub->GetItem()->NoPet) continue;
-
-        pet->AddLootDrop(
-            sub->GetItem(),
-            pet->GetLoottable(),
-            sub->GetCharges(),
-            1, 127,
-            true,   // equip_item = true (auto-equip)
-            false
-        );
-        equipped++;
-    }
-
-    if (equipped > 0) {
-        pet->UpdateEquipmentLight();
-        pet->CalcBonuses();
-        Message(Chat::Yellow, "Equipped %d item(s) from %s onto %s.",
-                equipped, bag->GetItem()->Name, pet->GetCleanName());
     }
 }
 ```
+
+> **Note on `AddLootDrop` API:** The function signature varies between EQEmu versions. Older builds use positional parameters (`AddLootDrop(item, loottable, charges, minlevel, maxlevel, equip, ...)`). Newer builds use a `LootdropEntriesRepository::NpcEntity` struct. Check your source's `zone/loot.cpp` to see which version you have. The key requirement is setting `equip_item = true/1` so items go into equipment slots, not just the loot table.
 
 ### Call Sites
 
@@ -171,35 +178,72 @@ Add the function declaration to `zone/client.h`. Search for other pet-related me
 
 ### Helper: `GetPetOriginClass()`
 
-Determines which class a pet belongs to based on its summon spell:
+Determines which class a pet belongs to based on its summon spell. Uses `GetSpellLevel()` — a standard EQEmu function that returns the minimum level a class needs to cast a spell (returns 255 if the class can't use it).
+
+Add to `zone/pets.cpp` and declare in `zone/mob.h`:
 
 ```cpp
+// Declaration (mob.h, outside any class):
+int GetPetOriginClass(Mob* pet, Client* owner = nullptr);
+
+// Implementation (pets.cpp):
 int GetPetOriginClass(Mob* pet, Client* owner)
 {
     if (!pet || !pet->IsNPC()) return 0;
-    if (pet->IsCharmedPet()) return 0;
+    if (pet->IsCharmed()) return 0;
 
     uint16 spell_id = pet->CastToNPC()->GetPetSpellID();
     if (spell_id == 0) return 0;
 
-    // Check which pet class can cast this spell
-    // Check owner's primary class first, then alternates
+    // If owner provided, check their class first to avoid false matches
+    // on spells shared by multiple pet classes
     if (owner) {
         int primary = owner->GetClass();
-        if (primary == 15 || primary == 11 || primary == 13) {
-            if (IsValidPetSpellForClass(spell_id, primary))
-                return primary;
-        }
+        if (GetSpellLevel(spell_id, primary) < 255)
+            return primary;
     }
 
     // Fallback: check all pet classes
-    for (int c : {15, 11, 13}) {
-        if (IsValidPetSpellForClass(spell_id, c))
+    for (int c : {15, 11, 13}) {  // BST, NEC, MAG
+        if (GetSpellLevel(spell_id, static_cast<uint8>(c)) < 255)
             return c;
     }
     return 0;
 }
 ```
+
+> **Note:** `GetSpellLevel(spell_id, class_id)` returns 255 if that class cannot cast the spell. Any value less than 255 means the class has access to it.
+
+---
+
+## Lua Binding: GetMitigationAC (Optional)
+
+The `.petstats` command uses `GetMitigationAC()` to show effective (combat) AC. This method exists in C++ (`Mob::GetMitigationAC()`) but is **not exposed to Lua by default** in EQEmu. You need to add the binding:
+
+**Why this is needed:** EQEmu's `GetAC()` returns the raw base AC value from the NPC template. The actual AC used in combat is `mitigation_ac`, calculated by `ACSum()` — which includes item bonuses, defense skill, AGI, owner's pet mitigation AAs, and spell/AA buffs. Without this binding, Lua scripts can only see base AC, making it impossible to verify that satchel equipment is actually improving pet survivability.
+
+**`zone/lua_mob.h`** — add the declaration near other AC methods (search for `GetDisplayAC`):
+
+```cpp
+int GetMitigationAC();
+```
+
+**`zone/lua_mob.cpp`** — add the implementation:
+
+```cpp
+int Lua_Mob::GetMitigationAC() {
+    Lua_Safe_Call_Int();
+    return self->GetMitigationAC();
+}
+```
+
+And register it in the luabind scope (search for `.def("GetDisplayAC"` and add below):
+
+```cpp
+.def("GetMitigationAC", &Lua_Mob::GetMitigationAC)
+```
+
+> **Note:** If you skip this binding, replace `npc:GetMitigationAC()` with `npc:GetAC()` in the `.petstats` Lua script. You just won't see the effective AC that includes item bonuses.
 
 ---
 
@@ -372,37 +416,6 @@ if ($text =~ /satchel/i) {
 3. **Summon pet** — gear auto-equips instantly on summon
 4. **Change gear** — swap items in the satchel, then use `.petequip` to re-equip live pets
 5. **Check stats** — use `.petstats` to verify equipment bonuses are applied
-
----
-
-## Lua Binding: GetMitigationAC
-
-The `.petstats` command uses `GetMitigationAC()` to show effective (combat) AC. This method exists in C++ (`Mob::GetMitigationAC()`) but is **not exposed to Lua by default** in EQEmu. You need to add the binding:
-
-**Why this is needed:** EQEmu's `GetAC()` returns the raw base AC value from the NPC template. The actual AC used in combat is `mitigation_ac`, calculated by `ACSum()` — which includes item bonuses, defense skill, AGI, owner's pet mitigation AAs, and spell/AA buffs. Without this binding, Lua scripts can only see base AC, making it impossible to verify that satchel equipment is actually improving pet survivability.
-
-**`zone/lua_mob.h`** — add the declaration near other AC methods:
-
-```cpp
-int GetMitigationAC();
-```
-
-**`zone/lua_mob.cpp`** — add the implementation:
-
-```cpp
-int Lua_Mob::GetMitigationAC() {
-    Lua_Safe_Call_Int();
-    return self->GetMitigationAC();
-}
-```
-
-And register it in the luabind scope (near the existing `GetDisplayAC` binding):
-
-```cpp
-.def("GetMitigationAC", &Lua_Mob::GetMitigationAC)
-```
-
-> **Note:** If you skip this binding, you can replace `npc:GetMitigationAC()` with `npc:GetAC()` in the Lua script — you just won't see the effective AC that includes item bonuses.
 
 ---
 
