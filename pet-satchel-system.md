@@ -4,7 +4,7 @@ A custom pet equipment system for EQEmu servers that allows players to pre-load 
 
 ## Overview
 
-The Pet Satchel System adds three container items (one per pet class) that auto-equip their contents onto summoned pets. It integrates with the multi-pet system and supports crystal class multi-classing.
+The Pet Satchel System adds three container items (one per pet class) that auto-equip their contents onto summoned pets. Players place armor, weapons, and other equipment into their class-specific satchel, and every time they summon a pet, those items are automatically equipped.
 
 **Pet Classes Supported:**
 - Beastlord (BST)
@@ -13,12 +13,11 @@ The Pet Satchel System adds three container items (one per pet class) that auto-
 
 ## Features
 
-- **Auto-equip on summon** - pets are geared instantly when summoned
-- **Live re-equip** - `.petequip` command applies gear to already-summoned pets
-- **Pet stats inspection** - `.petstats` shows all pet stats including equipment effects
-- **Multi-pet aware** - each pet gets gear from its class-specific satchel
-- **Charm support** - charmed pets also receive satchel equipment
-- **Crystal class compatible** - works with multi-class crystal systems
+- **Auto-equip on summon** — pets are geared instantly when summoned
+- **Live re-equip** — `.petequip` command applies gear to already-summoned pets without resummoning
+- **Pet stats inspection** — `.petstats` shows all pet stats including equipment bonuses
+- **Charm support** — charmed pets also receive satchel equipment
+- **Bank storage** — satchels work from both inventory and bank slots
 
 ---
 
@@ -108,12 +107,11 @@ void Client::ApplyPetBagEquipment(NPC* pet)
 
         pet->AddLootDrop(
             sub->GetItem(),
-            pet->GetLoottable(),  // loot table reference
-            sub->GetCharges(),    // charges
-            1,                    // min (unused)
-            127,                  // max (unused)
-            true,                 // equip_item = true (auto-equip)
-            false                 // not a quest item
+            pet->GetLoottable(),
+            sub->GetCharges(),
+            1, 127,
+            true,   // equip_item = true (auto-equip)
+            false
         );
         equipped++;
     }
@@ -133,15 +131,15 @@ Add `ApplyPetBagEquipment()` calls in two places:
 
 **1. Pet Summoning** (`zone/pets.cpp` in `MakePoweredPet()`):
 ```cpp
-// AFTER AddNPC() and owner->AddPet() — CalcBonuses needs the pet registered
+// AFTER entity_list.AddNPC() and owner->SetPetID() calls
 if (IsClient()) {
     CastToClient()->ApplyPetBagEquipment(npc);
 }
 ```
 
-> **CRITICAL**: The `AddNPC()` and `AddPet()` calls MUST happen BEFORE `ApplyPetBagEquipment()`. The function calls `CalcBonuses()` which calls `GetOwner()` which checks `IsMyPet()`. If the pet isn't registered in the owner's pet list yet, it gets killed instantly.
+> **CRITICAL ordering**: `AddNPC()` and pet registration MUST happen BEFORE `ApplyPetBagEquipment()`. The function calls `CalcBonuses()` which calls `GetOwner()` — if the pet isn't registered yet, the server kills it.
 
-**2. Charm Spells** (`zone/spell_effects.cpp` in the Charm case):
+**2. Charm Spells** (`zone/spell_effects.cpp` in the Charm effect case):
 ```cpp
 // After charm is applied and pet is registered
 if (IsClient()) {
@@ -151,29 +149,29 @@ if (IsClient()) {
 
 ### Helper: `GetPetOriginClass()`
 
-Determines which class a pet belongs to (needed for multi-class scenarios):
+Determines which class a pet belongs to based on its summon spell:
 
 ```cpp
 int GetPetOriginClass(Mob* pet, Client* owner)
 {
     if (!pet || !pet->IsNPC()) return 0;
-    if (pet->IsCharmedPet()) return 0; // Charmed pets are classless
+    if (pet->IsCharmedPet()) return 0;
 
-    uint16 spell_id = pet->IsNPC() ? pet->CastToNPC()->GetPetSpellID() : 0;
+    uint16 spell_id = pet->CastToNPC()->GetPetSpellID();
     if (spell_id == 0) return 0;
 
-    // Check which of the owner's active classes can cast this pet spell
-    // Priority: primary > virtual > crystal classes
+    // Check which pet class can cast this spell
+    // Check owner's primary class first, then alternates
     if (owner) {
         int primary = owner->GetClass();
-        // Check if primary class can use this spell
-        if (IsValidPetSpellForClass(spell_id, primary))
-            return primary;
-        // Check virtual/crystal classes similarly...
+        if (primary == 15 || primary == 11 || primary == 13) {
+            if (IsValidPetSpellForClass(spell_id, primary))
+                return primary;
+        }
     }
 
     // Fallback: check all pet classes
-    for (int c : {15, 11, 13}) { // BST, NEC, MAG
+    for (int c : {15, 11, 13}) {
         if (IsValidPetSpellForClass(spell_id, c))
             return c;
     }
@@ -183,33 +181,30 @@ int GetPetOriginClass(Mob* pet, Client* owner)
 
 ---
 
-## Lua Commands
+## Player Commands (Lua)
 
-### `.petequip` - Live Pet Equipment
+### `.petequip` — Apply Gear to Live Pets
 
-Add to your `global_player.lua` `event_say` handler:
+Add to your `global_player.lua` `event_say` handler. This lets players apply satchel gear to already-summoned pets without resummoning:
 
 ```lua
 if msg:lower() == ".petequip" then
-    -- Map class to bag item ID
     local PET_BAGS = {[15] = 800500, [11] = 800501, [13] = 800502}
     local total_equipped = 0
 
-    -- Find all pets owned by this player
     local entity_list = eq.get_entity_list()
     local npc_list = entity_list:GetNPCList()
 
     for npc in npc_list.entries do
         if npc:GetOwnerID() == e.self:GetID() then
-            local pet_class = GetPetClass(npc)  -- determine pet's class
+            local pet_class = GetPetClass(npc)
             local bag_id = PET_BAGS[pet_class]
             if bag_id then
-                -- Find bag in inventory (slots 23-32) or bank (2000-2023)
                 local bag_slot = FindBagSlot(e.self, bag_id)
                 if bag_slot >= 0 then
                     local count = 0
                     for i = 0, 19 do
-                        local sub_slot = bag_slot * 100 + i  -- sub-item offset
+                        local sub_slot = bag_slot * 100 + i
                         local item = e.self:GetItemInSlot(sub_slot)
                         if item and item > 0 then
                             npc:AddItem(item, 1, true)  -- true = equip
@@ -232,9 +227,9 @@ if msg:lower() == ".petequip" then
 end
 ```
 
-### `.petstats` - Pet Statistics Display
+### `.petstats` — View Pet Statistics
 
-Shows comprehensive stats for all active pets:
+Shows comprehensive stats for all active pets including equipment bonuses:
 
 ```lua
 if msg:lower() == ".petstats" then
@@ -243,7 +238,7 @@ if msg:lower() == ".petstats" then
     local found = false
 
     for npc in npc_list.entries do
-        if npc:GetOwnerID() == e.self:GetID() and not npc:GetBodyType() == 21 then
+        if npc:GetOwnerID() == e.self:GetID() then
             found = true
             local name = npc:GetCleanName()
             e.self:Message(15, "--- " .. name .. " ---")
@@ -275,129 +270,61 @@ if msg:lower() == ".petstats" then
 end
 ```
 
-### `.pethelp` - Pet Command Reference
+---
 
-Can be implemented as either a GM command (C++) or Lua. Shows available `/pet` commands:
+## NPC Distribution (Optional)
 
-```
---- Multi-Pet Commands (affect ALL pets) ---
-/pet attack       - All pets attack your target
-/pet back off     - All pets stop attacking
-/pet follow me    - All pets follow you
-/pet guard here   - All pets guard current spot
-/pet guard me     - All pets guard near you
-/pet sit down     - All pets sit (regen)
-/pet stand up     - All pets stand
-/pet hold         - All pets hold (don't auto-aggro)
-/pet taunt        - Toggle taunt on all pets
-/pet no cast      - Toggle casting on all pets
-/pet get lost     - Dismiss FOCUSED pet only
+You can distribute satchels via an NPC. Example Perl script for a vendor NPC:
 
-Max 1 pet per active class, 3 total.
+```perl
+# In event_say handler
+if ($text =~ /satchel/i) {
+    my %PET_BAG = (15 => 800500, 11 => 800501, 13 => 800502);
+    my $class = $client->GetClass();
+
+    if (exists $PET_BAG{$class}) {
+        $client->SummonItem($PET_BAG{$class});
+        $client->Message(15, "Here is your pet satchel. Place equipment inside — it will auto-equip on your next pet summon.");
+    } else {
+        $client->Message(13, "Only Beastlords, Necromancers, and Magicians can use pet satchels.");
+    }
+}
 ```
 
 ---
 
-## Multi-Pet System Integration
+## Player Flow
 
-The Pet Satchel System works with the multi-pet architecture. Key structural changes:
-
-### mob.h - Pet ID Tracking
-
-```cpp
-// Replace single pet ID with a vector
-std::vector<uint16> petids;       // All active pet entity IDs
-uint16 focused_pet_id = 0;        // Currently focused pet
-
-// Key methods
-bool AddPet(uint16 pet_id);
-void RemovePet(uint16 pet_id);
-std::vector<Mob*> GetAllPets();
-bool IsMyPet(Mob* mob);
-void ValidatePetList();
-```
-
-### Pet Limits
-
-```cpp
-// In ruletypes.h
-RULE_INT(Pets, AbsolutePetLimit, 3, "Maximum total pets per player")
-```
-
-- One pet per active class (BST pet + NEC pet + MAG pet)
-- Familiars don't count toward the limit
-- Charm counts toward the limit (classless)
-- Suspend Minion is disabled (multi-pet replaces it)
-
-### Pet Command Broadcasting
-
-All `/pet` commands in `client_packet.cpp` are broadcast to ALL pets:
-
-```cpp
-// In OPPetCommand handler:
-auto all_pets = GetAllPets();
-for (auto* pet : all_pets) {
-    // Apply command to each pet
-    pet->Say("command...");
-}
-// Exception: /pet get lost only affects focused pet
-```
-
-### Pet Buff Broadcasting
-
-ST_Pet (targettype 14) spells auto-apply to ALL owned pets:
-
-```cpp
-// In spell_effects.cpp, when casting a pet-target spell:
-auto all_pets = GetAllPets();
-for (auto* pet : all_pets) {
-    SpellFinished(spell_id, pet);  // Cast on each pet
-}
-```
-
-### Pet Persistence (Zoning)
-
-Pets are saved before zone cleanup and restored on zone-in:
-
-- DB tables: `character_pet_info`, `character_pet_buffs`, `character_pet_inventory`
-- `pet` column uses 0-2 for up to 3 pets
-- Saved in `DoZoneSuccess()` BEFORE cleanup (flag `m_pets_saved_for_zone` prevents destructor overwrite)
+1. **Get satchel** — say "satchel" to the NPC vendor (or however you distribute them)
+2. **Fill it** — place weapons, armor, and other gear into the satchel container
+3. **Summon pet** — gear auto-equips instantly on summon
+4. **Change gear** — swap items in the satchel, then use `.petequip` to re-equip live pets
+5. **Check stats** — use `.petstats` to verify equipment bonuses are applied
 
 ---
 
 ## Tools & Requirements
 
 - **EQEmu Server** with source access (C++ modifications required)
-- **CMake + Visual Studio** (or GCC) for building zone.exe
+- **C++ compiler** (Visual Studio or GCC) for building zone.exe
 - **MySQL/MariaDB** for item creation
-- **Lua** for quest-side commands (`.petequip`, `.petstats`)
+- **Lua** for player commands (`.petequip`, `.petstats`)
 - No client-side modifications needed
 
 ## Files Modified
 
 | File | Changes |
 |------|---------|
-| `zone/pets.cpp` | `ApplyPetBagEquipment()`, `GetPetOriginClass()`, multi-pet logic |
-| `zone/mob.h` | `petids` vector, `focused_pet_id`, pet management methods |
-| `zone/mob.cpp` | Pet list management implementation |
-| `zone/spell_effects.cpp` | Charm auto-equip, pet buff broadcasting |
-| `zone/client_packet.cpp` | Pet command broadcasting to all pets |
-| `zone/client.h` | Method declarations |
-| `zone/client.cpp` | Pet persistence, zoning support |
-| `zone/zoning.cpp` | Save/restore multi-pet state |
-| `zone/zonedb.cpp` | Multi-pet DB read/write (pet column 0-2) |
-| `zone/ruletypes.h` | `Pets:AbsolutePetLimit` rule |
+| `zone/pets.cpp` | `ApplyPetBagEquipment()`, `GetPetOriginClass()` |
+| `zone/spell_effects.cpp` | Charm auto-equip call |
+| `zone/client.h` | `ApplyPetBagEquipment()` declaration |
 | `quests/global/global_player.lua` | `.petequip`, `.petstats` commands |
-| `quests/nexus/Spell_Weaver.pl` | Satchel acquisition NPC |
-
----
 
 ## Known Limitations
 
-- RoF2 client pet window focus swap doesn't work mid-session (architectural limitation)
 - Items with `NoPet=1` flag are skipped during auto-equip
-- Pet satchels search inventory slots 23-32 and bank slots 2000-2023 only
-- Crystal class spell clones (IDs 43000-44999) require special handling in `GetPetOriginClass()`
+- Satchels are searched in inventory (slots 23-32) then bank (2000-2023)
+- Charmed pets receive equipment but are classless (uses all three bags if found)
 
 ---
 
