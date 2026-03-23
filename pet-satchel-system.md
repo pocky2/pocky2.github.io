@@ -130,21 +130,43 @@ void Client::ApplyPetBagEquipment(NPC* pet)
 Add `ApplyPetBagEquipment()` calls in two places:
 
 **1. Pet Summoning** (`zone/pets.cpp` in `MakePoweredPet()`):
+
+Search for `MakePoweredPet` in `zone/pets.cpp`. Near the end of the function, find the block where the pet is added to the entity list and registered with the owner. It looks like this:
+
 ```cpp
-// AFTER entity_list.AddNPC() and owner->SetPetID() calls
-if (IsClient()) {
-    CastToClient()->ApplyPetBagEquipment(npc);
-}
+    // ... (existing code at end of MakePoweredPet) ...
+    entity_list.AddNPC(npc);    // <-- pet added to world
+    // ... owner->SetPetID() or AddPet() call ...
+
+    // === ADD THIS BLOCK ===
+    if (IsClient()) {
+        CastToClient()->ApplyPetBagEquipment(npc);
+    }
+    // === END ADDITION ===
 ```
 
-> **CRITICAL ordering**: `AddNPC()` and pet registration MUST happen BEFORE `ApplyPetBagEquipment()`. The function calls `CalcBonuses()` which calls `GetOwner()` — if the pet isn't registered yet, the server kills it.
+> **CRITICAL ordering**: Your addition MUST go AFTER both `entity_list.AddNPC()` and the pet registration call (`SetPetID` or `AddPet`). The function calls `CalcBonuses()` which calls `GetOwner()` — if the pet isn't in the entity list and registered with the owner yet, `GetOwner()` returns null and the server kills the pet.
 
-**2. Charm Spells** (`zone/spell_effects.cpp` in the Charm effect case):
+**2. Charm Spells** (`zone/spell_effects.cpp`):
+
+Search for `SE_Charm` or `case SE_Charm` in `zone/spell_effects.cpp`. Inside that case block, find where the charm is fully applied (after `SetPetID` or equivalent). Add the call at the end of the charm success path:
+
 ```cpp
-// After charm is applied and pet is registered
-if (IsClient()) {
-    CastToClient()->ApplyPetBagEquipment(target->CastToNPC());
-}
+    // ... (existing charm application code) ...
+
+    // === ADD THIS BLOCK ===
+    if (IsClient()) {
+        CastToClient()->ApplyPetBagEquipment(target->CastToNPC());
+    }
+    // === END ADDITION ===
+```
+
+### Header Declaration
+
+Add the function declaration to `zone/client.h`. Search for other pet-related methods (like `GetPetID` or `SetPetID`) and add nearby:
+
+```cpp
+    void ApplyPetBagEquipment(NPC* pet);
 ```
 
 ### Helper: `GetPetOriginClass()`
@@ -303,10 +325,50 @@ if ($text =~ /satchel/i) {
 
 ---
 
+## Building & Deploying
+
+After making the C++ changes, you need to rebuild `zone.exe` (the zone server binary). The other binaries (`world.exe`, `shared_memory.exe`, etc.) are unchanged.
+
+### Prerequisites
+
+- **CMake** (3.18+)
+- **C++ compiler**: Visual Studio 2022 (Windows) or GCC (Linux)
+- EQEmu source code with CMake build configured
+
+### Build Steps (Windows — Visual Studio)
+
+```bash
+# From your EQEmu source directory:
+cmake --preset <your-preset>            # Only needed first time or after CMakeLists.txt changes
+cmake --build build/<preset>/  --config Release --target zone
+```
+
+Or open the generated `.sln` in Visual Studio, set configuration to Release, right-click the `zone` project, and Build.
+
+### Build Steps (Linux — GCC)
+
+```bash
+# From your EQEmu source directory:
+mkdir -p build && cd build
+cmake ..
+make zone -j$(nproc)
+```
+
+### Deploy
+
+1. **Stop the server** (or at minimum stop all zone processes)
+2. Copy the new `zone.exe` (or `zone` on Linux) to your server's `bin/` directory
+3. Restart the server
+
+The Lua scripts (`.petequip`, `.petstats`) don't require a rebuild — just place them in your `quests/global/` directory and use `#reloadquest` in-game or restart.
+
+The SQL for satchel items can be run at any time — use `#reloadstatic` in-game to pick up new items without restart.
+
 ## Tools & Requirements
 
 - **EQEmu Server** with source access (C++ modifications required)
-- **C++ compiler** (Visual Studio or GCC) for building zone.exe
+- **CMake** (3.18+) for build configuration
+- **C++ compiler** (Visual Studio 2022 or GCC) for building zone.exe
 - **MySQL/MariaDB** for item creation
 - **Lua** for player commands (`.petequip`, `.petstats`)
 - No client-side modifications needed
