@@ -325,6 +325,7 @@ if ($text =~ /satchel/i) {
 - Items with `NoPet=1` flag are skipped during auto-equip
 - Satchels are searched in inventory (slots 23-32) then bank (2000-2023)
 - Charmed pets receive equipment but are classless (uses all three bags if found)
+- **`.petequip` is visual only** — `CalcBonuses()` is not exposed to Lua, so `.petequip` equips items visually but does not recalculate AC, ATK, or other stats. Full stat bonuses are only applied on pet summon (C++ `ApplyPetBagEquipment`) and on zoning (pet restore). To get full stats from new gear, resummon your pet.
 
 ---
 
